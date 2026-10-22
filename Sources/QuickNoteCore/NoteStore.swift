@@ -2,14 +2,24 @@ import Foundation
 import CryptoKit
 
 public final class NoteStore {
+    public struct FontSizeRun: Codable, Equatable {
+        public let location: Int
+        public let length: Int
+        public let size: Double
+        public init(location: Int, length: Int, size: Double) {
+            self.location = location; self.length = length; self.size = size
+        }
+    }
     struct Envelope: Codable {
         let version: Int
         let text: String
         let digest: String
         let updated: Date
+        var fontSizes: [FontSizeRun]? = nil
     }
     public let directory: URL
     public private(set) var text = ""
+    public private(set) var fontSizes: [FontSizeRun] = []
     public private(set) var recoveryMessage: String?
     public private(set) var isBlocked = false
     private var lastSnapshot = Date.distantPast
@@ -21,13 +31,13 @@ public final class NoteStore {
         self.directory = directory
         try fm.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
         if fm.fileExists(atPath: primary.path) {
-            do { text = try read(primary); return }
+            do { apply(try read(primary)); return }
             catch {
                 // Preserve the unreadable original before any future write.
                 try fm.copyItem(at: primary, to: directory.appendingPathComponent("unreadable-\(UUID().uuidString).json"))
                 for candidate in [previous] + backups() {
                     if let recovered = try? read(candidate) {
-                        text = recovered
+                        apply(recovered)
                         recoveryMessage = "已从备份恢复，请检查内容。"
                         return
                     }
@@ -39,7 +49,7 @@ public final class NoteStore {
             // A missing main file must not silently ignore surviving backups.
             for candidate in [previous] + backups() {
                 if let recovered = try? read(candidate) {
-                    text = recovered
+                    apply(recovered)
                     recoveryMessage = "已从备份找回记录。"
                     return
                 }
@@ -49,10 +59,19 @@ public final class NoteStore {
     private func digest(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
-    private func read(_ url: URL) throws -> String {
+    private func apply(_ record: Envelope) {
+        text = record.text
+        fontSizes = record.fontSizes ?? []
+    }
+    private func read(_ url: URL) throws -> Envelope {
         let record = try JSONDecoder().decode(Envelope.self, from: Data(contentsOf: url))
         guard record.version == 1, record.digest == digest(record.text) else { throw StoreError.invalid }
-        return record.text
+        let length = (record.text as NSString).length
+        guard (record.fontSizes ?? []).allSatisfy({
+            $0.location >= 0 && $0.length > 0 && $0.location <= length &&
+            $0.length <= length - $0.location && $0.size.isFinite && (8...96).contains($0.size)
+        }) else { throw StoreError.invalid }
+        return record
     }
     private func durableWrite(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
@@ -60,7 +79,7 @@ public final class NoteStore {
         defer { try? handle.close() }
         try handle.synchronize()
     }
-    public func save(_ value: String, forceSnapshot: Bool = false) throws {
+    public func save(_ value: String, fontSizes: [FontSizeRun] = [], forceSnapshot: Bool = false) throws {
         guard !isBlocked else { throw StoreError.blocked }
         if fm.fileExists(atPath: primary.path), let existing = try? Data(contentsOf: primary), (try? read(primary)) != nil {
             try durableWrite(existing, to: previous)
@@ -69,11 +88,11 @@ public final class NoteStore {
                 lastSnapshot = Date()
             }
         }
-        let record = Envelope(version: 1, text: value, digest: digest(value), updated: Date())
+        let record = Envelope(version: 1, text: value, digest: digest(value), updated: Date(), fontSizes: fontSizes.isEmpty ? nil : fontSizes)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try durableWrite(encoder.encode(record), to: primary)
-        text = value
+        apply(record)
         let old = backups().dropFirst(100)
         for url in old { try? fm.removeItem(at: url) }
     }
@@ -81,15 +100,15 @@ public final class NoteStore {
         ((try? fm.contentsOfDirectory(at: backupDirectory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
             .filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
-    public func backupText(at url: URL) throws -> String { try read(url) }
+    public func backupText(at url: URL) throws -> String { try read(url).text }
     public func restore(from url: URL) throws -> String {
         let recovered = try read(url)
         let blocked = isBlocked
         isBlocked = false
-        do { try save(recovered, forceSnapshot: true) }
+        do { try save(recovered.text, fontSizes: recovered.fontSizes ?? [], forceSnapshot: true) }
         catch { isBlocked = blocked; throw error }
         recoveryMessage = nil
-        return recovered
+        return recovered.text
     }
     public enum StoreError: LocalizedError {
         case invalid, blocked
