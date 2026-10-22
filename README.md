@@ -6,8 +6,8 @@
 
 从 [GitHub Releases](https://github.com/HEXING19/QuickNote/releases/latest) 下载最新版：
 
-- `QuickNote-1.0.1-universal.dmg`：打开后将 QuickNote 拖到 Applications。
-- `QuickNote-1.0.1-universal.zip`：解压后将 QuickNote.app 放到应用程序目录。
+- `QuickNote-1.0.2-universal.dmg`：打开后将 QuickNote 拖到 Applications。
+- `QuickNote-1.0.2-universal.zip`：解压后将 QuickNote.app 放到应用程序目录。
 - `SHA256SUMS.txt`：下载文件的 SHA-256 校验值。
 
 支持 macOS 13 及以上，Universal 2 包包含 Apple Silicon 与 Intel。当前使用 ad-hoc 签名，未经过 Apple 开发者证书签名与公证，首次打开可能受到 macOS 安全检查限制。

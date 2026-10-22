@@ -463,7 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             placeholder.isHidden = !editor.string.isEmpty; statusLabel.stringValue = "已恢复并保存"; statusLabel.textColor = muted
         } catch { alert("恢复失败", error.localizedDescription) }
     }
-    @objc func about() { alert("QuickNote 1.0.1", "随手记录，随时续写。") }
+    @objc func about() { alert("QuickNote 1.0.2", "一张随时续写的草稿纸。") }
     @objc func toggleLogin() {
         do { if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }; statusItem.menu = optionsMenu() }
         catch { alert("无法更改登录启动", error.localizedDescription) }

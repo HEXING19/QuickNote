@@ -180,7 +180,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             icon.image = PaperIdentity.image(size: 64); content.addSubview(icon)
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
             _ = text("QuickNote \(version)", x: 106, y: 109, width: 400, size: 19, weight: .semibold)
-            _ = text("随手记录，随时续写。", x: 106, y: 140, width: 400, color: muted)
+            _ = text("一张随时续写的草稿纸。", x: 106, y: 140, width: 400, color: muted)
         }
     }
     func refreshStatus() {
