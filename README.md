@@ -6,8 +6,8 @@
 
 从 [GitHub Releases](https://github.com/HEXING19/QuickNote/releases/latest) 下载最新版：
 
-- `QuickNote-1.0.2-universal.dmg`：打开后将 QuickNote 拖到 Applications。
-- `QuickNote-1.0.2-universal.zip`：解压后将 QuickNote.app 放到应用程序目录。
+- `QuickNote-1.0.3-universal.dmg`：打开后将 QuickNote 拖到 Applications。
+- `QuickNote-1.0.3-universal.zip`：解压后将 QuickNote.app 放到应用程序目录。
 - `SHA256SUMS.txt`：下载文件的 SHA-256 校验值。
 
 支持 macOS 13 及以上，Universal 2 包包含 Apple Silicon 与 Intel。当前使用 ad-hoc 签名，未经过 Apple 开发者证书签名与公证，首次打开可能受到 macOS 安全检查限制。
@@ -69,3 +69,13 @@ dist/QuickNote.app/Contents/MacOS/QuickNote --data-dir /tmp/quicknote-paper-chec
 ```
 
 此模式不注册全局快捷键，使用独立草稿和偏好设置，输出三态原生截图与 `paper-smoke.txt`，随后退出。它检查悬停展开便签但不抢焦点、点击聚焦、自动保存与重新展开；不替代真实鼠标悬停、多屏和输入法测试。
+
+## 在线更新
+
+菜单栏和「设置 → 关于」提供「检查更新」。正常启动 15 秒后自动检查正式 Release；隔离验证模式不联网检查。发现新版后，经确认下载，再确认安装并重启。网络失败可手动重试；后台检查失败不打断编辑。
+
+更新源为 `HEXING19/QuickNote` 的 GitHub Releases latest API。发布标签使用 `v1.2.3` 或 `1.2.3`，附件必须命名为 `QuickNote-1.2.3-universal.zip`，内部为 `QuickNote.app`，其版本应与标签一致。下载使用 GitHub API 提供的 SHA-256 digest，并校验包内应用标识、版本和代码签名；缺少 digest 的旧附件需重新上传。GitHub 文档：https://docs.github.com/en/rest/releases/releases
+
+更新前会保存笔记；保存失败则阻止安装。应用需位于可写目录，不支持从磁盘映像或 App Translocation 位置直接更新。安装保留同目录的 `QuickNote-previous-UUID.app` 供手动恢复，确认新版本正常后可删除。笔记及备份目录不受更新影响。当前仍为 ad-hoc 签名；摘要校验依赖 GitHub 仓库安全，不等于 Apple 公证。
+
+已有 1.0.2 用户需先手动安装一次包含更新功能的版本。包含在线更新功能的首个版本为 1.0.3。

@@ -126,6 +126,7 @@ final class HandleView: NSView {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NSWindowDelegate, NSMenuDelegate {
+    lazy var updater = UpdateController(app: self)
     var settingsController: SettingsWindowController?
     var store: NoteStore?
     let defaults: UserDefaults = {
@@ -158,6 +159,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
     var preview: Bool { CommandLine.arguments.contains("--preview") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if !CommandLine.arguments.contains("--data-dir") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.updater.check(automatic: true) }
+        }
         NSApp.setActivationPolicy(.accessory)
         NSApp.appearance = NSAppearance(named: .aqua)
         buildApplicationMenu()
@@ -429,6 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         menu.addItem(item(panel.isVisible ? "收起 QuickNote" : "打开 QuickNote", #selector(menuToggle)))
         menu.addItem(.separator())
         let settings = item("设置…", #selector(showSettings)); settings.keyEquivalent = ","; menu.addItem(settings)
+        menu.addItem(item("检查更新…", #selector(checkForUpdates)))
         menu.addItem(.separator())
         let quitItem = item("退出 QuickNote", #selector(quit)); quitItem.keyEquivalent = "q"; menu.addItem(quitItem)
         return menu
@@ -440,6 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         if settingsController == nil { settingsController = SettingsWindowController(app: self) }
         settingsController?.showWindow(nil)
     }
+    @objc func checkForUpdates() { updater.check() }
     @objc func retrySave() { _ = persist() }
     @objc func openData() { if let store { NSWorkspace.shared.open(store.directory) } }
     @objc func exportText() {
@@ -463,7 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             placeholder.isHidden = !editor.string.isEmpty; statusLabel.stringValue = "已恢复并保存"; statusLabel.textColor = muted
         } catch { alert("恢复失败", error.localizedDescription) }
     }
-    @objc func about() { alert("QuickNote 1.0.2", "一张随时续写的草稿纸。") }
+    @objc func about() { alert("QuickNote " + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""), "一张随时续写的草稿纸。") }
     @objc func toggleLogin() {
         do { if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }; statusItem.menu = optionsMenu() }
         catch { alert("无法更改登录启动", error.localizedDescription) }
