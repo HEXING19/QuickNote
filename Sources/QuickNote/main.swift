@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import ServiceManagement
 import QuickNoteCore
+import Quartz
 
 extension NSColor {
     convenience init(hex: UInt32) { self.init(srgbRed: CGFloat((hex >> 16) & 255)/255, green: CGFloat((hex >> 8) & 255)/255, blue: CGFloat(hex & 255)/255, alpha: 1) }
@@ -36,11 +37,17 @@ final class PaperScrollView: NSScrollView {
         }
     }
 }
-final class PaperView: FontSizingTextView {
+final class PaperView: FontSizingTextView, QLPreviewPanelDataSource {
     var escape: (() -> Void)?
+    var quickLookItem: NSURL?
     var store: NoteStore?
     var previewImage: ((PaperImage) -> Void)?
     var imagePasteFailed: ((String) -> Void)?
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { quickLookItem != nil }
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) { panel.dataSource = self }
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) { panel.dataSource = nil }
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { quickLookItem == nil ? 0 : 1 }
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! { quickLookItem }
     override func cancelOperation(_ sender: Any?) {
         if hasMarkedText() { super.cancelOperation(sender) } else { escape?() }
     }
@@ -105,7 +112,10 @@ final class PaperView: FontSizingTextView {
         if !hasMarkedText(), event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
            let index = imageIndex(at: convert(event.locationInWindow, from: nil)),
            let image = textStorage?.attribute(.attachment, at: index, effectiveRange: nil) as? PaperImage {
-            previewImage?(image); return
+            window?.makeFirstResponder(self)
+            setSelectedRange(NSRange(location: index, length: 1))
+            if event.clickCount == 2 { previewImage?(image) }
+            return
         }
         super.mouseDown(with: event)
     }
@@ -256,7 +266,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
     var hotHandler: EventHandlerRef?
     var dirty = false
     var inDialog = false
-    var imagePreview: PaperImagePreview?
+    var imagePreview: QLPreviewPanel?
+    var previewVisibilityTimer: Timer?
+    var restoreImagePreview: (() -> Void)?
     var saveTimer: Timer?
     var openGeneration = 0
     var drawerInteraction = DrawerInteraction()
@@ -294,6 +306,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         }
         localKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            if let preview = self.imagePreview, preview.isKeyWindow, event.keyCode == 53 {
+                self.closeImagePreview(); return nil
+            }
             if event.window === self.panel, self.panel.isKeyWindow, self.panel.firstResponder === self.editor,
                self.editor.handleFontSizeShortcut(event) { return nil }
             let index = self.defaults.integer(forKey: "shortcut")
@@ -498,11 +513,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         return true
     }
     func clickedOutside() { if panel.isVisible && !inDialog { hidePanel(restoreFocus: false) } }
-    @objc func deactivated() { imagePreview?.close(); clickedOutside() }
+    @objc func deactivated() { closeImagePreview(); clickedOutside() }
     @objc func hideAction() { hidePanel(restoreFocus: true) }
     @objc func menuToggle() { DispatchQueue.main.async { self.toggle() } }
     @objc func toggle() {
-        if let imagePreview { imagePreview.close(); return }
+        if imagePreview != nil { closeImagePreview(); return }
         if drawerInteraction.state == .hovered { showPanel(onPointerScreen: false) }
         else if panel.isVisible { hidePanel(restoreFocus: true) }
         else { showPanel() }
@@ -562,21 +577,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
     @objc func openData() { if let store { NSWorkspace.shared.open(store.directory) } }
     func showImagePreview(_ attachment: PaperImage) {
         guard imagePreview == nil else { return }
-        guard let data = store?.imageData(for: attachment.id), let image = NSImage(data: data) else {
+        guard let data = store?.imageData(for: attachment.id), let preview = QLPreviewPanel.shared() else {
             alert("无法打开图片", "原图文件缺失或已损坏，其他笔记内容不受影响。"); return
         }
+        let url: URL
+        do { url = try PaperImage.quickLookFile(from: data) }
+        catch { alert("无法打开图片", error.localizedDescription); return }
         let selection = editor.selectedRange()
-        let preview = PaperImagePreview(image: image, on: panel.screen ?? currentScreen)
+        editor.quickLookItem = url as NSURL
         imagePreview = preview
-        preview.onClose = { [weak self] in
+        restoreImagePreview = { [weak self] in
             guard let self else { return }
-            self.imagePreview = nil
+            self.editor.quickLookItem = nil
+            preview.updateController()
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
             if self.panel.isVisible && NSApp.isActive {
                 self.panel.makeKeyAndOrderFront(nil); self.panel.makeFirstResponder(self.editor)
                 self.editor.setSelectedRange(selection)
             }
         }
+        preview.updateController()
+        preview.reloadData()
         preview.makeKeyAndOrderFront(nil)
+        previewVisibilityTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self, weak preview] _ in
+            if preview?.isVisible != true { self?.closeImagePreview() }
+        }
+    }
+    func closeImagePreview() {
+        guard let preview = imagePreview else { return }
+        imagePreview = nil
+        previewVisibilityTimer?.invalidate(); previewVisibilityTimer = nil
+        preview.orderOut(nil)
+        let restore = restoreImagePreview
+        restoreImagePreview = nil
+        restore?()
     }
     @objc func exportText() {
         inDialog = true; defer { inDialog = false }
@@ -727,16 +761,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         let point = NSPoint(x: bounds.midX + editor.textContainerOrigin.x, y: bounds.midY + editor.textContainerOrigin.y)
         let position = editor.convert(point, to: nil)
         let thumbnailFits = bounds.width > 100 && bounds.width <= container.size.width && editor.imageIndex(at: point) == attachment.location
-        let selection = editor.selectedRange()
         if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: position, modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) { editor.mouseDown(with: click) }
-        let opened = imagePreview?.isVisible == true && panel.isVisible
-        if let root = imagePreview?.contentView { capture(root, "image-preview") }
-        let control = imagePreview?.toolbar?.items.compactMap { $0.view as? NSSegmentedControl }.first
-        control?.selectedSegment = 1
-        if let control, let action = control.action { _ = NSApp.sendAction(action, to: control.target, from: control) }
-        let zoomed = (imagePreview?.contentView as? NSScrollView)?.hasHorizontalScroller == true
-        if let preview = imagePreview, let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: preview.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) { preview.sendEvent(escape) }
+        let selection = editor.selectedRange()
+        let selected = imagePreview == nil && selection == NSRange(location: attachment.location, length: 1)
+        if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: position, modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 2, pressure: 1) { editor.mouseDown(with: click) }
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.4))
+        let file = editor.quickLookItem as URL?
+        let opened = imagePreview?.isVisible == true && imagePreview?.dataSource === editor && panel.isVisible &&
+            file.flatMap { try? Data(contentsOf: $0) } == store?.imageData(for: attachment.id) && file != nil
+        imagePreview?.orderOut(nil)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
         let closed = imagePreview == nil && panel.isVisible && panel.firstResponder === editor && editor.selectedRange() == selection
+        let cleaned = file.map { !FileManager.default.fileExists(atPath: $0.path) } ?? false
         if let click = NSEvent.mouseEvent(with: .rightMouseDown, location: position, modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
            let menu = editor.menu(for: click), let item = menu.items.last, let action = item.action {
             undo?.beginUndoGrouping(); _ = NSApp.sendAction(action, to: item.target, from: item); undo?.endUndoGrouping()
@@ -744,7 +780,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         let deleted = editor.savedImages.isEmpty && store?.images.isEmpty == true
         undo?.undo()
         let restored = editor.savedImages == [attachment] && store?.images == [attachment]
-        return "imagePasted=\(persisted)\nimageUndo=\(undone)\nimageRedo=\(redone)\nthumbnailFits=\(thumbnailFits)\nimageOpens=\(opened)\nactualSizeZoom=\(zoomed)\nescapeReturnsToEditor=\(closed)\nimageDeleted=\(deleted)\nimageDeleteUndo=\(restored)\n"
+        return "imagePasted=\(persisted)\nimageUndo=\(undone)\nimageRedo=\(redone)\nthumbnailFits=\(thumbnailFits)\nsingleClickSelects=\(selected)\ndoubleClickOpensQuickLook=\(opened)\ncloseReturnsToEditor=\(closed)\npreviewFileCleaned=\(cleaned)\nimageDeleted=\(deleted)\nimageDeleteUndo=\(restored)\n"
     }
     func capturePreview() {
         guard let root = panel.contentView, let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { return }

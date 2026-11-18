@@ -1,6 +1,6 @@
 import AppKit
 import ImageIO
-import QuickNoteCore
+import UniformTypeIdentifiers
 
 final class PaperImage: NSTextAttachment {
     static let pasteboardTypes: [NSPasteboard.PasteboardType] = [.png, .init("public.jpeg"), .tiff]
@@ -21,6 +21,20 @@ final class PaperImage: NSTextAttachment {
     }
 
     required init?(coder: NSCoder) { return nil }
+
+    static func quickLookFile(from data: Data) throws -> URL {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let identifier = CGImageSourceGetType(source),
+              let ext = UTType(identifier as String)?.preferredFilenameExtension else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("QuickNote-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let file = directory.appendingPathComponent("便签图片").appendingPathExtension(ext)
+        do { try data.write(to: file, options: .atomic) }
+        catch { try? FileManager.default.removeItem(at: directory); throw error }
+        return file
+    }
 
     static func thumbnail(from data: Data) -> NSImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -43,81 +57,5 @@ private final class PaperImageCell: NSTextAttachmentCell {
 
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView?, characterIndex charIndex: Int, layoutManager: NSLayoutManager) {
         image?.draw(in: cellFrame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-    }
-}
-
-final class PaperImagePreview: NSPanel, NSWindowDelegate {
-    private let scroll = NSScrollView()
-    private let canvas = NSView()
-    private let imageView = NSImageView()
-    private let pixelSize: NSSize
-    private let zoom = NSSegmentedControl(labels: ["适应窗口", "100%"], trackingMode: .selectOne, target: nil, action: nil)
-    var onClose: (() -> Void)?
-
-    init(image: NSImage, on screen: NSScreen) {
-        pixelSize = image.representations.first.map { NSSize(width: $0.pixelsWide, height: $0.pixelsHigh) } ?? image.size
-        let area = screen.visibleFrame
-        let size = NSSize(width: min(920, area.width * 0.85), height: min(700, area.height * 0.85))
-        super.init(contentRect: NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2, width: size.width, height: size.height), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        title = "图片预览"
-        isReleasedWhenClosed = false
-        level = .floating
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        minSize = NSSize(width: 280, height: 200)
-        delegate = self
-        let toolbar = NSToolbar(identifier: "QuickNoteImagePreview")
-        toolbar.delegate = self
-        self.toolbar = toolbar
-        zoom.selectedSegment = 0
-        zoom.target = self; zoom.action = #selector(changeZoom)
-        scroll.drawsBackground = true; scroll.backgroundColor = NSColor.windowBackgroundColor
-        scroll.autohidesScrollers = true
-        scroll.documentView = canvas
-        imageView.image = image
-        imageView.imageScaling = .scaleAxesIndependently
-        imageView.setAccessibilityLabel("便签原图")
-        canvas.addSubview(imageView)
-        contentView = scroll
-        setFrameOrigin(NSPoint(x: area.midX - frame.width / 2, y: area.midY - frame.height / 2))
-        layoutImage()
-    }
-
-    override var canBecomeKey: Bool { true }
-
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown && event.keyCode == 53 { close(); return }
-        super.sendEvent(event)
-    }
-
-    func windowDidResize(_ notification: Notification) { layoutImage() }
-    func windowWillClose(_ notification: Notification) { onClose?() }
-    @objc private func changeZoom() { layoutImage(center: true) }
-
-    private func layoutImage(center: Bool = false) {
-        let actual = zoom.selectedSegment == 1
-        scroll.hasHorizontalScroller = actual; scroll.hasVerticalScroller = actual
-        let viewport = scroll.contentSize
-        let actualScale = 1 / backingScaleFactor
-        let scale = actual ? actualScale : min(actualScale, max(1, viewport.width - 40) / max(1, pixelSize.width), max(1, viewport.height - 40) / max(1, pixelSize.height))
-        let size = NSSize(width: pixelSize.width * scale, height: pixelSize.height * scale)
-        let canvasSize = NSSize(width: max(viewport.width, size.width), height: max(viewport.height, size.height))
-        canvas.setFrameSize(canvasSize)
-        imageView.frame = NSRect(x: (canvasSize.width - size.width) / 2, y: (canvasSize.height - size.height) / 2, width: size.width, height: size.height)
-        if center {
-            scroll.contentView.scroll(to: NSPoint(x: (canvasSize.width - viewport.width) / 2, y: (canvasSize.height - viewport.height) / 2))
-            scroll.reflectScrolledClipView(scroll.contentView)
-        }
-    }
-}
-
-extension PaperImagePreview: NSToolbarDelegate {
-    private static let zoomItem = NSToolbarItem.Identifier("imageZoom")
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, Self.zoomItem] }
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, Self.zoomItem] }
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        guard identifier == Self.zoomItem else { return nil }
-        let item = NSToolbarItem(itemIdentifier: identifier)
-        item.label = "缩放"; item.view = zoom
-        return item
     }
 }
