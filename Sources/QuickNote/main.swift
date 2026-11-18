@@ -38,24 +38,129 @@ final class PaperScrollView: NSScrollView {
 }
 final class PaperView: FontSizingTextView {
     var escape: (() -> Void)?
-    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
-        guard let font = typingAttributes[.font] as? NSFont ?? font else { super.drawInsertionPoint(in: rect, color: color, turnedOn: flag); return }
-        var caret = rect
-        // Paragraph spacing belongs between lines, not in the visible caret.
-        caret.origin.y += max(0, (font.ascender-font.descender-font.pointSize)/2)
-        caret.size.height = min(rect.height, font.pointSize)
-        super.drawInsertionPoint(in: caret, color: color, turnedOn: flag)
-    }
+    var store: NoteStore?
+    var previewImage: ((PaperImage) -> Void)?
+    var imagePasteFailed: ((String) -> Void)?
     override func cancelOperation(_ sender: Any?) {
         if hasMarkedText() { super.cancelOperation(sender) } else { escape?() }
     }
-    override func paste(_ sender: Any?) { pasteAsPlainText(sender) }
+    override func paste(_ sender: Any?) {
+        if !pasteImage(from: .general) { pasteAsPlainText(sender) }
+    }
+    @discardableResult func pasteImage(from pasteboard: NSPasteboard) -> Bool {
+        guard isEditable, let store, let type = pasteboard.availableType(from: PaperImage.pasteboardTypes) else { return false }
+        guard let data = pasteboard.data(forType: type), let thumbnail = PaperImage.thumbnail(from: data) else {
+            if pasteboard.string(forType: .string) != nil { return false }
+            imagePasteFailed?("剪贴板中的图片无法读取。"); return true
+        }
+        do {
+            let id = try store.storeImage(data)
+            let selection = selectedRange()
+            let text = string as NSString
+            let breaks = CharacterSet.newlines
+            let needsBreak = selection.location > 0 && text.rangeOfCharacter(from: breaks, options: [], range: NSRange(location: selection.location - 1, length: 1)).location == NSNotFound
+            let insertion = NSMutableAttributedString(string: needsBreak ? "\n" : "", attributes: typingAttributes)
+            insertion.append(NSAttributedString(attachment: PaperImage(id: id, thumbnail: thumbnail)))
+            insertion.append(NSAttributedString(string: "\n", attributes: typingAttributes))
+            breakUndoCoalescing()
+            insertText(insertion, replacementRange: selection)
+            breakUndoCoalescing()
+            undoManager?.setActionName("粘贴图片")
+        } catch { imagePasteFailed?(error.localizedDescription) }
+        return true
+    }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), NSPasteboard.general.availableType(from: PaperImage.pasteboardTypes) != nil { return isEditable }
+        return super.validateUserInterfaceItem(item)
+    }
+    var savedImages: [NoteStore.ImageRun] {
+        guard let storage = textStorage else { return [] }
+        var images: [NoteStore.ImageRun] = []
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let image = value as? PaperImage else { return }
+            for location in range.location..<NSMaxRange(range) { images.append(.init(location: location, id: image.id)) }
+        }
+        return images
+    }
+    func loadImages(_ images: [NoteStore.ImageRun]) {
+        guard let storage = textStorage else { return }
+        storage.beginEditing()
+        for image in images {
+            storage.addAttribute(.attachment, value: PaperImage(id: image.id, data: store?.imageData(for: image.id)), range: NSRange(location: image.location, length: 1))
+        }
+        storage.endEditing()
+    }
+    func imageIndex(at point: NSPoint) -> Int? {
+        guard let manager = layoutManager, let container = textContainer, let storage = textStorage else { return nil }
+        manager.ensureLayout(for: container)
+        let origin = textContainerOrigin
+        let point = NSPoint(x: point.x - origin.x, y: point.y - origin.y)
+        let glyph = manager.glyphIndex(for: point, in: container)
+        guard glyph < manager.numberOfGlyphs,
+              manager.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container).contains(point) else { return nil }
+        let index = manager.characterIndexForGlyph(at: glyph)
+        return storage.attribute(.attachment, at: index, effectiveRange: nil) is PaperImage ? index : nil
+    }
+    override func mouseDown(with event: NSEvent) {
+        if !hasMarkedText(), event.modifierFlags.intersection([.shift, .command, .option, .control]).isEmpty,
+           let index = imageIndex(at: convert(event.locationInWindow, from: nil)),
+           let image = textStorage?.attribute(.attachment, at: index, effectiveRange: nil) as? PaperImage {
+            previewImage?(image); return
+        }
+        super.mouseDown(with: event)
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let index = imageIndex(at: convert(event.locationInWindow, from: nil)) else { return super.menu(for: event) }
+        let menu = NSMenu()
+        for (title, action) in [("复制图片", #selector(copyImageFromMenu)), ("删除图片", #selector(deleteImageFromMenu))] {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self; item.tag = index
+            if action == #selector(deleteImageFromMenu), !isEditable { menu.removeItem(item) }
+        }
+        return menu
+    }
+    @objc private func copyImageFromMenu(_ sender: NSMenuItem) { _ = copyImage(at: sender.tag) }
+    @objc private func deleteImageFromMenu(_ sender: NSMenuItem) {
+        guard isEditable, !hasMarkedText(), let storage = textStorage, sender.tag < storage.length,
+              storage.attribute(.attachment, at: sender.tag, effectiveRange: nil) is PaperImage else { return }
+        let text = string as NSString
+        let startsLine = sender.tag == 0 || text.character(at: sender.tag - 1) == 10
+        let endsLine = sender.tag + 1 < text.length && text.character(at: sender.tag + 1) == 10
+        breakUndoCoalescing()
+        insertText("", replacementRange: NSRange(location: sender.tag, length: startsLine && endsLine ? 2 : 1))
+        breakUndoCoalescing()
+        undoManager?.setActionName("删除图片")
+    }
+    private func copyImage(at index: Int) -> Bool {
+        guard let storage = textStorage, index < storage.length,
+              let image = storage.attribute(.attachment, at: index, effectiveRange: nil) as? PaperImage,
+              let data = store?.imageData(for: image.id), let bitmap = NSImage(data: data) else { return false }
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.writeObjects([bitmap])
+    }
+    override func copy(_ sender: Any?) {
+        let selection = selectedRange()
+        let images = savedImages.filter { NSLocationInRange($0.location, selection) }
+        guard !images.isEmpty else { super.copy(sender); return }
+        if selection.length == 1, copyImage(at: selection.location) { return }
+        let text = (string as NSString).substring(with: selection)
+        let relative = images.map { NoteStore.ImageRun(location: $0.location - selection.location, id: $0.id) }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(NoteStore.plainText(text, images: relative), forType: .string)
+    }
+    override func cut(_ sender: Any?) {
+        let selection = selectedRange()
+        guard savedImages.contains(where: { NSLocationInRange($0.location, selection) }) else { super.cut(sender); return }
+        guard isEditable, !hasMarkedText() else { return }
+        copy(sender)
+        breakUndoCoalescing(); insertText("", replacementRange: selection); breakUndoCoalescing()
+    }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.command) && !event.modifierFlags.contains(.option) && !event.modifierFlags.contains(.control) {
             switch event.charactersIgnoringModifiers {
             case "a": selectAll(nil); return true
             case "c": copy(nil); return true
-            case "v": pasteAsPlainText(nil); return true
+            case "v": paste(nil); return true
             case "x": cut(nil); return true
             case "z": if event.modifierFlags.contains(.shift) { undoManager?.redo() } else { undoManager?.undo() }; return true
             default: break
@@ -151,6 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
     var hotHandler: EventHandlerRef?
     var dirty = false
     var inDialog = false
+    var imagePreview: PaperImagePreview?
     var saveTimer: Timer?
     var openGeneration = 0
     var drawerInteraction = DrawerInteraction()
@@ -188,6 +294,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         }
         localKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            if event.window === self.panel, self.panel.isKeyWindow, self.panel.firstResponder === self.editor,
+               self.editor.handleFontSizeShortcut(event) { return nil }
             let index = self.defaults.integer(forKey: "shortcut")
             let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
             let matches = (index == 0 && event.keyCode == 49 && flags == .option) || (index == 1 && event.keyCode == 38 && flags == [.command, .shift]) || (index == 2 && event.keyCode == 40 && flags == [.command, .shift])
@@ -226,7 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             menu.addItem(withTitle: title, action: Selector(selector), keyEquivalent: key)
         }
         menu.addItem(.separator())
-        menu.addItem(withTitle: "放大字体", action: #selector(FontSizingTextView.enlargeSelectedText(_:)), keyEquivalent: "=")
+        menu.addItem(withTitle: "放大字体", action: #selector(FontSizingTextView.enlargeSelectedText(_:)), keyEquivalent: "+")
         menu.addItem(withTitle: "缩小字体", action: #selector(FontSizingTextView.shrinkSelectedText(_:)), keyEquivalent: "-")
         main.addItem(edit); NSApp.mainMenu = main
     }
@@ -265,6 +373,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         editor.typingAttributes = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: ink, .paragraphStyle: paragraph]
         editor.string = store?.text ?? ""; editor.delegate = self; editor.isEditable = store != nil && store?.isBlocked == false
         editor.loadFontSizes(store?.fontSizes ?? [])
+        editor.store = store; editor.loadImages(store?.images ?? [])
+        editor.previewImage = { [weak self] image in self?.showImagePreview(image) }
+        editor.imagePasteFailed = { [weak self] message in self?.alert("无法粘贴图片", message) }
         editor.escape = { [weak self] in self?.hidePanel(restoreFocus: true) }
         scroll.documentView = editor
         scroll.tile()
@@ -346,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         editor.setSelectedRange(NSRange(location: location, length: 0)); editor.scrollRangeToVisible(editor.selectedRange())
     }
     func checkHover() {
-        guard !inDialog, settingsController?.window?.isVisible != true else { return }
+        guard !inDialog, imagePreview == nil, settingsController?.window?.isVisible != true else { return }
         let pointer = NSEvent.mouseLocation
         let action = drawerInteraction.update(
             insideHandle: handle.frame.contains(pointer),
@@ -377,7 +488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         }
     }
     @discardableResult func hidePanel(restoreFocus: Bool) -> Bool {
-        guard panel.isVisible, !inDialog else { return false }
+        guard panel.isVisible, !inDialog, imagePreview == nil else { return false }
         if dirty && !persist() { drawerInteraction.beginEditing(); panel.acceptsEditingFocus = true; panel.makeKeyAndOrderFront(nil); return false }
         let hadEditingFocus = drawerInteraction.state == .editing
         drawerInteraction.didHide()
@@ -387,10 +498,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         return true
     }
     func clickedOutside() { if panel.isVisible && !inDialog { hidePanel(restoreFocus: false) } }
-    @objc func deactivated() { clickedOutside() }
+    @objc func deactivated() { imagePreview?.close(); clickedOutside() }
     @objc func hideAction() { hidePanel(restoreFocus: true) }
     @objc func menuToggle() { DispatchQueue.main.async { self.toggle() } }
     @objc func toggle() {
+        if let imagePreview { imagePreview.close(); return }
         if drawerInteraction.state == .hovered { showPanel(onPointerScreen: false) }
         else if panel.isVisible { hidePanel(restoreFocus: true) }
         else { showPanel() }
@@ -410,7 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         }
         guard let store else { statusLabel.stringValue = "无法保存 · 请导出文字"; statusLabel.textColor = .systemRed; return false }
         do {
-            try store.save(editor.string, fontSizes: editor.savedFontSizes); dirty = false
+            try store.save(editor.string, fontSizes: editor.savedFontSizes, images: editor.savedImages); dirty = false
             statusLabel.stringValue = "自动保存"; statusLabel.textColor = muted; statusLabel.toolTip = nil
             saveTimer?.invalidate(); saveTimer = nil
             return true
@@ -448,11 +560,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
     @objc func checkForUpdates() { updater.check() }
     @objc func retrySave() { _ = persist() }
     @objc func openData() { if let store { NSWorkspace.shared.open(store.directory) } }
+    func showImagePreview(_ attachment: PaperImage) {
+        guard imagePreview == nil else { return }
+        guard let data = store?.imageData(for: attachment.id), let image = NSImage(data: data) else {
+            alert("无法打开图片", "原图文件缺失或已损坏，其他笔记内容不受影响。"); return
+        }
+        let selection = editor.selectedRange()
+        let preview = PaperImagePreview(image: image, on: panel.screen ?? currentScreen)
+        imagePreview = preview
+        preview.onClose = { [weak self] in
+            guard let self else { return }
+            self.imagePreview = nil
+            if self.panel.isVisible && NSApp.isActive {
+                self.panel.makeKeyAndOrderFront(nil); self.panel.makeFirstResponder(self.editor)
+                self.editor.setSelectedRange(selection)
+            }
+        }
+        preview.makeKeyAndOrderFront(nil)
+    }
     @objc func exportText() {
         inDialog = true; defer { inDialog = false }
         let save = NSSavePanel(); save.nameFieldStringValue = "QuickNote.txt"; save.allowedContentTypes = [.plainText]
         if save.runModal() == .OK, let url = save.url {
-            do { try editor.string.write(to: url, atomically: true, encoding: .utf8) } catch { alert("导出失败", error.localizedDescription) }
+            do { try NoteStore.plainText(editor.string, images: editor.savedImages).write(to: url, atomically: true, encoding: .utf8) } catch { alert("导出失败", error.localizedDescription) }
         }
     }
     @objc func restoreBackup() {
@@ -465,7 +595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             let dialog = NSAlert(); dialog.messageText = "恢复这份备份？"; dialog.informativeText = "当前已保存内容会先备份。\n\n" + String(candidate.prefix(700)); dialog.addButton(withTitle: "恢复"); dialog.addButton(withTitle: "取消")
             guard dialog.runModal() == .alertFirstButtonReturn else { return }
             if dirty && !persist() { alert("当前内容尚未保存", "请先导出当前文字，再恢复备份。"); return }
-            editor.string = try store.restore(from: url); editor.loadFontSizes(store.fontSizes); editor.undoManager?.removeAllActions(); editor.isEditable = true
+            editor.string = try store.restore(from: url); editor.loadFontSizes(store.fontSizes); editor.loadImages(store.images); editor.undoManager?.removeAllActions(); editor.isEditable = true
             placeholder.isHidden = !editor.string.isEmpty; statusLabel.stringValue = "已恢复并保存"; statusLabel.textColor = muted
         } catch { alert("恢复失败", error.localizedDescription) }
     }
@@ -546,10 +676,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             self.editor.selectAll(nil)
             self.editor.insertText("这是用来验证自动换行的连续长句，文字超过便签宽度时应该自动换到下一行，最开始的文字始终保留在纸面内。ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", replacementRange: self.editor.selectedRange())
             self.editor.setSelectedRange(NSRange(location: 0, length: 7))
-            let enlargeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: self.panel.windowNumber, context: nil, characters: "=", charactersIgnoringModifiers: "=", isARepeat: false, keyCode: 24)!
-            let shortcutHandled = self.editor.performKeyEquivalent(with: enlargeEvent)
-            let fontSizesSaved = shortcutHandled && self.editor.savedFontSizes == [.init(location: 0, length: 7, size: 16)] && self.store?.fontSizes == self.editor.savedFontSizes && (try? NoteStore(directory: directory).fontSizes) == self.editor.savedFontSizes
-            self.editor.setSelectedRange(NSRange(location: 0, length: 0))
+            let enlargeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: self.panel.windowNumber, context: nil, characters: "+", charactersIgnoringModifiers: "+", isARepeat: false, keyCode: 24)!
+            NSApp.sendEvent(enlargeEvent)
+            let selectionEnlarged = self.editor.savedFontSizes == [.init(location: 0, length: 7, size: 16)]
+            let caret = NSRange(location: 0, length: 0)
+            self.editor.setSelectedRange(caret)
+            let shrinkEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: self.panel.windowNumber, context: nil, characters: "-", charactersIgnoringModifiers: "-", isARepeat: false, keyCode: 27)!
+            NSApp.sendEvent(shrinkEvent)
+            let fontSizesSaved = selectionEnlarged && self.editor.selectedRange() == caret && self.editor.savedFontSizes == [.init(location: 7, length: (self.editor.string as NSString).length - 7, size: 12)] && self.store?.fontSizes == self.editor.savedFontSizes && (try? NoteStore(directory: directory).fontSizes) == self.editor.savedFontSizes
             self.editor.layoutManager?.ensureLayout(for: self.editor.textContainer!)
             capture(self.panel.contentView!, "paper-editor")
             let scroll = self.editor.enclosingScrollView!
@@ -562,10 +696,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             _ = self.hidePanel(restoreFocus: false)
             self.showPanel(onPointerScreen: false)
             let restored = self.editor.string == self.store?.text && self.panel.firstResponder === self.editor
-            let result = "hoverPreviewNoFocus=\(hoverPassed)\nclickFocus=\(focusPassed)\nsaved=\(saved)\nwrapped=\(wrapped)\nreopen=\(restored)\nfontSizesSaved=\(fontSizesSaved)\n"
+            let imageChecks = self.checkImageWorkflow(directory: directory, capture: capture)
+            let result = "hoverPreviewNoFocus=\(hoverPassed)\nclickFocus=\(focusPassed)\nsaved=\(saved)\nwrapped=\(wrapped)\nreopen=\(restored)\nfontSizesSaved=\(fontSizesSaved)\n" + imageChecks
             try? result.write(to: directory.appendingPathComponent("paper-smoke.txt"), atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
         }
+    }
+    private func checkImageWorkflow(directory: URL, capture: (NSView, String) -> Void) -> String {
+        let image = NSImage(size: NSSize(width: 1800, height: 1000), flipped: false) { rect in
+            NSColor.systemBlue.setFill(); rect.fill(); return true
+        }
+        let clipboard = NSPasteboard.withUniqueName()
+        defer { clipboard.releaseGlobally() }
+        guard clipboard.writeObjects([image]), let manager = editor.layoutManager, let container = editor.textContainer else { return "imagePasted=false\n" }
+        let undo = editor.undoManager
+        undo?.beginUndoGrouping()
+        editor.setSelectedRange(NSRange(location: 6, length: 0))
+        let pasted = editor.pasteImage(from: clipboard)
+        undo?.endUndoGrouping()
+        guard let attachment = editor.savedImages.first else { return "imagePasted=false\n" }
+        let persisted = pasted && (try? NoteStore(directory: directory).images) == [attachment]
+        undo?.undo()
+        let undone = editor.savedImages.isEmpty && store?.images.isEmpty == true
+        undo?.redo()
+        let redone = editor.savedImages == [attachment] && store?.images == [attachment]
+        if let root = panel.contentView { capture(root, "paper-with-image") }
+        manager.ensureLayout(for: container)
+        let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: attachment.location, length: 1), actualCharacterRange: nil)
+        let bounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        let point = NSPoint(x: bounds.midX + editor.textContainerOrigin.x, y: bounds.midY + editor.textContainerOrigin.y)
+        let position = editor.convert(point, to: nil)
+        let thumbnailFits = bounds.width > 100 && bounds.width <= container.size.width && editor.imageIndex(at: point) == attachment.location
+        let selection = editor.selectedRange()
+        if let click = NSEvent.mouseEvent(with: .leftMouseDown, location: position, modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) { editor.mouseDown(with: click) }
+        let opened = imagePreview?.isVisible == true && panel.isVisible
+        if let root = imagePreview?.contentView { capture(root, "image-preview") }
+        let control = imagePreview?.toolbar?.items.compactMap { $0.view as? NSSegmentedControl }.first
+        control?.selectedSegment = 1
+        if let control, let action = control.action { _ = NSApp.sendAction(action, to: control.target, from: control) }
+        let zoomed = (imagePreview?.contentView as? NSScrollView)?.hasHorizontalScroller == true
+        if let preview = imagePreview, let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: preview.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) { preview.sendEvent(escape) }
+        let closed = imagePreview == nil && panel.isVisible && panel.firstResponder === editor && editor.selectedRange() == selection
+        if let click = NSEvent.mouseEvent(with: .rightMouseDown, location: position, modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+           let menu = editor.menu(for: click), let item = menu.items.last, let action = item.action {
+            undo?.beginUndoGrouping(); _ = NSApp.sendAction(action, to: item.target, from: item); undo?.endUndoGrouping()
+        }
+        let deleted = editor.savedImages.isEmpty && store?.images.isEmpty == true
+        undo?.undo()
+        let restored = editor.savedImages == [attachment] && store?.images == [attachment]
+        return "imagePasted=\(persisted)\nimageUndo=\(undone)\nimageRedo=\(redone)\nthumbnailFits=\(thumbnailFits)\nimageOpens=\(opened)\nactualSizeZoom=\(zoomed)\nescapeReturnsToEditor=\(closed)\nimageDeleted=\(deleted)\nimageDeleteUndo=\(restored)\n"
     }
     func capturePreview() {
         guard let root = panel.contentView, let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { return }

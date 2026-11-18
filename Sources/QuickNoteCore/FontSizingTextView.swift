@@ -2,7 +2,32 @@ import AppKit
 
 /// Font changes are text edits, so undo and autosave follow the same path as typing.
 open class FontSizingTextView: NSTextView {
+    open override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        super.drawInsertionPoint(in: visibleInsertionPointRect(rect), color: color, turnedOn: flag)
+    }
+
+    func visibleInsertionPointRect(_ rect: NSRect) -> NSRect {
+        let text = string as NSString
+        let location = selectedRange().location
+        guard location <= text.length else { return rect }
+
+        var lineStart = 0
+        var contentEnd = 0
+        text.getLineStart(&lineStart, end: nil, contentsEnd: &contentEnd, for: NSRange(location: location, length: 0))
+        let bodyFont = NSFont.systemFont(ofSize: 14)
+        let caretFont = lineStart == contentEnd ? bodyFont : (typingAttributes[.font] as? NSFont ?? font ?? bodyFont)
+        let height = caretFont.pointSize
+        let fontInset = max(0, (caretFont.ascender - caretFont.descender - height) / 2)
+        let topInset = min(fontInset, max(0, rect.height - height))
+        return NSRect(x: rect.minX, y: rect.minY + topInset, width: rect.width, height: height)
+    }
+
     open override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        handleFontSizeShortcut(event) || super.performKeyEquivalent(with: event)
+    }
+
+    public func handleFontSizeShortcut(_ event: NSEvent) -> Bool {
+        guard isEditable, !hasMarkedText() else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if modifiers == .command || modifiers == [.command, .shift] {
             switch event.charactersIgnoringModifiers {
@@ -11,16 +36,16 @@ open class FontSizingTextView: NSTextView {
             default: break
             }
         }
-        return super.performKeyEquivalent(with: event)
+        return false
     }
 
     @objc public func enlargeSelectedText(_ sender: Any?) { resizeSelection(by: 2) }
     @objc public func shrinkSelectedText(_ sender: Any?) { resizeSelection(by: -2) }
 
     private func resizeSelection(by delta: CGFloat) {
-        guard isEditable, !hasMarkedText(), let storage = textStorage else { return }
-        let ranges = selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
-        guard !ranges.isEmpty else { return }
+        guard isEditable, !hasMarkedText(), let storage = textStorage, storage.length > 0 else { return }
+        let selections = selectedRanges.map(\.rangeValue).filter { $0.length > 0 }
+        let ranges = selections.isEmpty ? [NSRange(location: 0, length: storage.length)] : selections
         let updated = NSMutableAttributedString(attributedString: storage)
         var changed = false
         for range in ranges {

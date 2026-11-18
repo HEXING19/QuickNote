@@ -160,7 +160,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         case 1:
             let card = group(height: 330)
             let rows: [(String, String, String, Selector)] = [
-                ("导出笔记", "将当前内容导出为纯文本文件。", "导出文本…", #selector(exportNote)),
+                ("导出笔记", "导出纯文本，图片显示为 [图片]。", "导出文本…", #selector(exportNote)),
                 ("恢复内容", "选择备份，预览后再确认恢复。", "选择备份…", #selector(restoreNote)),
                 ("本机文件", "查看笔记数据与备份文件。", "打开文件夹", #selector(openFolder))
             ]

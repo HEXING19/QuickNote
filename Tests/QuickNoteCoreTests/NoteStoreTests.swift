@@ -53,4 +53,40 @@ final class NoteStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.save("尚未保存"))
         XCTAssertEqual(store.text, "已保存")
     }
+
+    func testImageSurvivesReopenDeletionAndBackupRestore() throws {
+        let store = try NoteStore(directory: temporary())
+        try store.save("原有文字 📝")
+        let bytes = Data([18, 54, 62])
+        let id = try store.storeImage(bytes)
+        XCTAssertEqual(try store.storeImage(bytes), id)
+        let text = "原有文字 📝\n\(NoteStore.imageMarker)\n继续写"
+        let image = NoteStore.ImageRun(location: ("原有文字 📝\n" as NSString).length, id: id)
+        try store.save(text, images: [image])
+        let reopened = try NoteStore(directory: store.directory)
+        XCTAssertEqual(reopened.images, [image])
+        XCTAssertEqual(reopened.imageData(for: id), bytes)
+        try reopened.save("删除图片", forceSnapshot: true)
+        let backup = try XCTUnwrap(reopened.backups().first { (try? reopened.backupText(at: $0)) == "原有文字 📝\n[图片]\n继续写" })
+        XCTAssertEqual(try reopened.restore(from: backup), text)
+        XCTAssertEqual(reopened.images, [image])
+        XCTAssertEqual(reopened.imageData(for: id), bytes)
+    }
+
+    func testMissingImageDoesNotDiscardTextOrImageReference() throws {
+        let directory = try temporary()
+        let store = try NoteStore(directory: directory)
+        let id = try store.storeImage(Data([123]))
+        let image = NoteStore.ImageRun(location: 0, id: id)
+        let text = "\(NoteStore.imageMarker)\n仍需保留的文字"
+        try store.save(text, images: [image])
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("Images"))
+        let reopened = try NoteStore(directory: directory)
+        XCTAssertEqual(reopened.text, text)
+        XCTAssertEqual(reopened.images, [image])
+        XCTAssertNil(reopened.imageData(for: id))
+        XCTAssertThrowsError(try store.save("普通文字", images: [image]))
+        XCTAssertThrowsError(try store.save(text, images: [image, image]))
+        XCTAssertThrowsError(try store.save(text, images: [.init(location: 0, id: "../previous.json")]))
+    }
 }
