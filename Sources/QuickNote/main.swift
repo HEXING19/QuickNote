@@ -38,6 +38,75 @@ final class PaperScrollView: NSScrollView {
     }
 }
 final class PaperView: FontSizingTextView, QLPreviewPanelDataSource {
+    private let atmosphereCaret = AtmosphereCaret()
+    private var pendingStrike: Bool?
+    var atmosphere = WritingAtmosphere.paper {
+        didSet {
+            hideAtmosphereCaret()
+            updateInsertionPointStateAndRestartTimer(true)
+        }
+    }
+
+    func hideAtmosphereCaret() {
+        atmosphereCaret.isHidden = true
+        pendingStrike = nil
+    }
+
+    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
+        guard atmosphere != .paper, !hasMarkedText() else {
+            atmosphereCaret.isHidden = true
+            super.drawInsertionPoint(in: rect, color: color, turnedOn: flag)
+            return
+        }
+        guard flag, isEditable, window?.isKeyWindow == true, selectedRange().length == 0 else {
+            atmosphereCaret.isHidden = true
+            return
+        }
+        if atmosphereCaret.superview == nil {
+            atmosphereCaret.wantsLayer = true
+            addSubview(atmosphereCaret, positioned: .above, relativeTo: nil)
+        }
+        let caret = visibleInsertionPointRect(rect)
+        let text = string as NSString
+        let location = selectedRange().location
+        let beforeCharacter = location < text.length
+            && text.rangeOfCharacter(from: .newlines, range: NSRange(location: location, length: 1)).location == NSNotFound
+        let width = max(6, caret.height * (beforeCharacter ? 0.88 : 0.58))
+        atmosphereCaret.atmosphere = atmosphere
+        atmosphereCaret.outlinesNextCharacter = beforeCharacter
+        atmosphereCaret.frame = NSRect(x: caret.minX, y: caret.minY, width: width, height: caret.height)
+        atmosphereCaret.needsDisplay = true
+        atmosphereCaret.isHidden = false
+        if let lineFeed = pendingStrike {
+            pendingStrike = nil
+            atmosphereCaret.pulse(lineFeed: lineFeed)
+        }
+    }
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        let value = (insertString as? NSAttributedString)?.string ?? insertString as? String ?? ""
+        if atmosphere != .paper, isEditable, !value.isEmpty {
+            pendingStrike = value.hasSuffix("\n")
+        }
+        super.insertText(insertString, replacementRange: replacementRange)
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        if atmosphere != .paper, isEditable, !hasMarkedText() { pendingStrike = true }
+        super.insertNewline(sender)
+    }
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        hideAtmosphereCaret()
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { hideAtmosphereCaret() }
+        return resigned
+    }
+
     var escape: (() -> Void)?
     var quickLookItem: NSURL?
     var store: NoteStore?
@@ -183,6 +252,9 @@ final class HandleView: NSView {
     static let restingWidth: CGFloat = 29.4
     static let expandedWidth: CGFloat = 85.4
     static let paperHeight: CGFloat = 50.4
+    var atmosphere = WritingAtmosphere.paper {
+        didSet { needsDisplay = true }
+    }
     var clicked: (() -> Void)?
     var moved: ((CGFloat) -> Void)?
     var finishedDrag: (() -> Void)?
@@ -221,7 +293,7 @@ final class HandleView: NSView {
         fold.line(to: NSPoint(x: 14, y: 1))
         fold.curve(to: NSPoint(x: 1, y: 13), controlPoint1: NSPoint(x: 6, y: 3), controlPoint2: NSPoint(x: 2, y: 7))
         NSColor(srgbRed: 0.88, green: 0.82, blue: 0.70, alpha: 1).setFill(); fold.fill()
-        PaperIdentity.drawMark(in: NSRect(x: 11, y: (r.height-23)/2, width: 23, height: 23))
+        atmosphere.drawMark(in: NSRect(x: 11, y: (r.height-23)/2, width: 23, height: 23))
         let progress = max(0, min(1, (bounds.width-Self.restingWidth)/(Self.expandedWidth-Self.restingWidth)))
         if progress > 0 {
             ("记一下" as NSString).draw(at: NSPoint(x: 45, y: (r.height-19)/2), withAttributes: [
@@ -253,6 +325,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
     var panel: NotePanel!
     var handle: NSPanel!
     var handleView: HandleView!
+    private var atmosphereButton: NSButton!
+    private lazy var atmosphere = defaults.string(forKey: "writingAtmosphere")
+        .flatMap(WritingAtmosphere.init(rawValue:)) ?? .paper
     var editor: PaperView!
     var placeholder: NSTextField!
     var statusLabel: NSTextField!
@@ -373,9 +448,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         root.appearance = NSAppearance(named: .aqua); panel.contentView = root
         let title = label("速记", size: 14, color: ink)
         let close = iconButton("xmark", title: "收起（Esc）", action: #selector(hideAction))
+        atmosphereButton = NSButton(title: atmosphere.title + " ⌄", target: self, action: #selector(showAtmosphereMenu))
+        atmosphereButton.font = .systemFont(ofSize: 12)
+        atmosphereButton.isBordered = false
+        atmosphereButton.refusesFirstResponder = true
+        atmosphereButton.translatesAutoresizingMaskIntoConstraints = false
+        atmosphereButton.setAccessibilityLabel("写作氛围")
+        atmosphereButton.setAccessibilityValue(atmosphere.title)
         let topLine = NSView(); topLine.wantsLayer = true; topLine.layer?.backgroundColor = line.cgColor; topLine.translatesAutoresizingMaskIntoConstraints = false
         let scroll = PaperScrollView(); scroll.drawsBackground = true; scroll.backgroundColor = PaperIdentity.paper; scroll.hasHorizontalScroller = false; scroll.horizontalScrollElasticity = .none; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.borderType = .noBorder; scroll.translatesAutoresizingMaskIntoConstraints = false
         editor = PaperView(frame: NSRect(x: 0, y: 0, width: 360, height: 420))
+        editor.atmosphere = atmosphere
         editor.minSize = NSSize(width: 0, height: 0); editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false; editor.autoresizingMask = [.width]
         editor.textContainer?.containerSize = NSSize(width: 360, height: CGFloat.greatestFiniteMagnitude)
@@ -398,10 +481,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         statusLabel = label(store == nil ? "存储不可用 · 请先导出文字" : "自动保存", size: 11)
         saveIcon = NSImageView(image: symbol("checkmark.circle")!); saveIcon.contentTintColor = muted; saveIcon.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for v in [title, close, topLine, scroll, placeholder!, saveIcon!, statusLabel!] { root.addSubview(v) }
+        for v in [title, close, atmosphereButton!, topLine, scroll, placeholder!, saveIcon!, statusLabel!] { root.addSubview(v) }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22), title.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
             close.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8), close.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            atmosphereButton.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -4),
+            atmosphereButton.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            atmosphereButton.heightAnchor.constraint(equalToConstant: 26),
             topLine.topAnchor.constraint(equalTo: root.topAnchor, constant: 48), topLine.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 22), topLine.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), topLine.heightAnchor.constraint(equalToConstant: 0.5),
             scroll.topAnchor.constraint(equalTo: topLine.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 1), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -1), scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -44),
             placeholder.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 21), placeholder.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 20),
@@ -409,11 +495,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             statusLabel.leadingAnchor.constraint(equalTo: saveIcon.trailingAnchor, constant: 6), statusLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -18), statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -22)
         ])
     }
+    @objc private func showAtmosphereMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        for mode in WritingAtmosphere.allCases {
+            let item = menu.addItem(withTitle: mode.title, action: #selector(selectAtmosphere), keyEquivalent: "")
+            item.target = self
+            item.state = mode == atmosphere ? .on : .off
+            item.representedObject = mode.rawValue
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.isFlipped ? sender.bounds.maxY : sender.bounds.minY), in: sender)
+    }
+
+    @objc private func selectAtmosphere(_ sender: NSMenuItem) {
+        guard let identifier = sender.representedObject as? String,
+              let mode = WritingAtmosphere(rawValue: identifier) else { return }
+        atmosphere = mode
+        defaults.set(mode.rawValue, forKey: "writingAtmosphere")
+        atmosphereButton.title = mode.title + " ⌄"
+        atmosphereButton.setAccessibilityValue(mode.title)
+        handleView.atmosphere = mode
+        editor.atmosphere = mode
+    }
+
     func buildHandle() {
         handle = NSPanel(contentRect: NSRect(x: 0, y: 0, width: HandleView.restingWidth, height: HandleView.paperHeight), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         handle.level = .floating; handle.hidesOnDeactivate = false; handle.isOpaque = false; handle.backgroundColor = .clear; handle.hasShadow = false
         handle.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         handleView = HandleView(frame: NSRect(x: 0, y: 0, width: HandleView.restingWidth, height: HandleView.paperHeight)); handle.contentView = handleView
+        handleView.atmosphere = atmosphere
         handleView.clicked = { [weak self] in self?.showPanel(onPointerScreen: false) }
         handleView.moved = { [weak self] y in
             guard let self else { return }; let area = self.currentScreen.visibleFrame
@@ -507,6 +616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
         if dirty && !persist() { drawerInteraction.beginEditing(); panel.acceptsEditingFocus = true; panel.makeKeyAndOrderFront(nil); return false }
         let hadEditingFocus = drawerInteraction.state == .editing
         drawerInteraction.didHide()
+        editor.hideAtmosphereCaret()
         defaults.set(editor.selectedRange().location, forKey: "selection")
         openGeneration += 1; panel.orderOut(nil); animateHandle(expanded: false, animated: false); handle.orderFrontRegardless()
         if restoreFocus && hadEditingFocus, let app = previousApp, app.processIdentifier != ProcessInfo.processInfo.processIdentifier { app.activate(options: []) }
@@ -730,8 +840,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextViewDelegate, NS
             _ = self.hidePanel(restoreFocus: false)
             self.showPanel(onPointerScreen: false)
             let restored = self.editor.string == self.store?.text && self.panel.firstResponder === self.editor
+            let originalMode = self.atmosphere
+            let originalText = self.editor.string
+            let originalSelection = self.editor.selectedRange()
+            let originalHandleSize = self.handle.frame.size
+            let atmospheresPassed = WritingAtmosphere.allCases.allSatisfy { mode in
+                let item = NSMenuItem()
+                item.representedObject = mode.rawValue
+                self.selectAtmosphere(item)
+                capture(self.handleView, "side-tab-" + mode.rawValue)
+                self.editor.displayIfNeeded()
+                capture(self.panel.contentView!, "editor-" + mode.rawValue)
+                let usesCustomCaret = self.editor.subviews.contains { $0 is AtmosphereCaret && !$0.isHidden }
+                let caretMatches = usesCustomCaret == (mode != .paper)
+                return caretMatches && self.defaults.string(forKey: "writingAtmosphere") == mode.rawValue
+                    && self.handleView.atmosphere == mode
+                    && self.editor.atmosphere == mode
+                    && self.handle.frame.size == originalHandleSize
+                    && self.editor.string == originalText
+                    && self.editor.selectedRange() == originalSelection
+            }
+            let originalItem = NSMenuItem()
+            originalItem.representedObject = originalMode.rawValue
+            self.selectAtmosphere(originalItem)
             let imageChecks = self.checkImageWorkflow(directory: directory, capture: capture)
-            let result = "hoverPreviewNoFocus=\(hoverPassed)\nclickFocus=\(focusPassed)\nsaved=\(saved)\nwrapped=\(wrapped)\nreopen=\(restored)\nfontSizesSaved=\(fontSizesSaved)\n" + imageChecks
+            let result = "hoverPreviewNoFocus=\(hoverPassed)\nclickFocus=\(focusPassed)\nsaved=\(saved)\nwrapped=\(wrapped)\nreopen=\(restored)\nfontSizesSaved=\(fontSizesSaved)\natmospheres=\(atmospheresPassed)\n" + imageChecks
             try? result.write(to: directory.appendingPathComponent("paper-smoke.txt"), atomically: true, encoding: .utf8)
             NSApp.terminate(nil)
         }

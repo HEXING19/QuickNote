@@ -6,7 +6,7 @@ open class FontSizingTextView: NSTextView {
         super.drawInsertionPoint(in: visibleInsertionPointRect(rect), color: color, turnedOn: flag)
     }
 
-    func visibleInsertionPointRect(_ rect: NSRect) -> NSRect {
+    package func visibleInsertionPointRect(_ rect: NSRect) -> NSRect {
         let text = string as NSString
         let location = selectedRange().location
         guard location <= text.length else { return rect }

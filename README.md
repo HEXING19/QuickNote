@@ -6,8 +6,8 @@
 
 从 [GitHub Releases](https://github.com/HEXING19/QuickNote/releases/latest) 下载最新版：
 
-- `QuickNote-1.0.3-universal.dmg`：打开后将 QuickNote 拖到 Applications。
-- `QuickNote-1.0.3-universal.zip`：解压后将 QuickNote.app 放到应用程序目录。
+- `QuickNote-1.0.6-universal.dmg`：打开后将 QuickNote 拖到 Applications。
+- `QuickNote-1.0.6-universal.zip`：解压后将 QuickNote.app 放到应用程序目录。
 - `SHA256SUMS.txt`：下载文件的 SHA-256 校验值。
 
 支持 macOS 13 及以上，Universal 2 包包含 Apple Silicon 与 Intel。当前使用 ad-hoc 签名，未经过 Apple 开发者证书签名与公证，首次打开可能受到 macOS 安全检查限制。
@@ -21,6 +21,7 @@
 - 输入自动保存；Esc、右上角关闭按钮或点击其他软件收起。
 - 菜单栏只保留打开/收起、设置和退出。设置从菜单栏打开。
 - 浅色设置窗口分为通用、数据与备份、关于；导出、恢复和数据文件夹集中在数据页，保存失败时显示重试按钮。
+- 点击便签右上角的模式名，可切换原版纸笺、打印机和电报机。应用会记住上次选择。
 - 支持纯文本粘贴、撤销/重做、全选和系统中文输入。
 - 截图后按 `⌘V` 可在光标处粘贴图片。单击缩略图只选中，双击用 macOS「快速查看」打开原图（与 Finder 中按空格键相同）；按 Esc 返回编辑。右键可复制或删除图片，删除和粘贴都可撤销。
 - 在便签编辑器中按 Command + 加号（或 Command + =）放大字体，Command + - 缩小。有选区时只调整选中文字，没有选区时调整整篇笔记。每次调整 2 pt，范围 8–96 pt；字号随内容自动保存，支持撤销/重做。导出仍为纯文本。
